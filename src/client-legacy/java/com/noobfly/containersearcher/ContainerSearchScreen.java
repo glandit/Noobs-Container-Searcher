@@ -180,6 +180,11 @@ public final class ContainerSearchScreen extends CompatScreen {
 	private String viewingKey;
 	private List<ContainerRecord> ownRecords;
 	private long dataBytes = -1;
+	// per-frame work cached: decoded stacks (NBT parse) and the hovered row's "locate all" lookup
+	private final Map<ContainerItemRecord, ItemStack> stackCache = new java.util.IdentityHashMap<>();
+	private List<ModSettings.Location> frameLocations;
+	private ResultRow multiRow;
+	private boolean multiValue;
 	private double serverScroll;
 	private final List<ServerSummary> serverSummaries = new ArrayList<>();
 	private final Map<String, Set<String>> typeMatchCache = new HashMap<>();
@@ -347,6 +352,7 @@ public final class ContainerSearchScreen extends CompatScreen {
 	protected void renderContent(Gfx g, int mouseX, int mouseY, float partialTick) {
 		mx = mouseX;
 		my = mouseY;
+		frameLocations = null;
 		hits.clear();
 		scrollAreas.clear();
 		g.fill(0, 0, width, height, BACKDROP);
@@ -705,7 +711,7 @@ public final class ContainerSearchScreen extends CompatScreen {
 		Item item = BuiltInRegistries.ITEM.getValue(ResourceLocation.parse(row.itemId));
 		ItemStack stack = ItemStack.EMPTY;
 		if (item != null) {
-			stack = displayStack(item, row.item);
+			stack = stackCache.computeIfAbsent(row.item, rec -> displayStack(item, rec));
 			g.fakeItem(stack, x + 7, y + 6);
 			g.itemDecorations(font, stack, x + 7, y + 6, "");
 			if (inView && hovered(x + 5, y + 4, 20, 20)) {
@@ -723,7 +729,11 @@ public final class ContainerSearchScreen extends CompatScreen {
 		} else if (hover) {
 			// settings decide which buttons exist; "all" is skipped when it would match "locate"
 			boolean wantOne = ModSettings.locateOneEnabled();
-			boolean multi = recordsFor(row).size() > singleRecordFor(row).size();
+			if (multiRow != row) {
+				multiRow = row;
+				multiValue = recordsFor(row).size() > singleRecordFor(row).size();
+			}
+			boolean multi = multiValue;
 			if (ModSettings.locateAllEnabled() && !row.record.blockGone && (multi || !wantOne)) {
 				String all = Component.translatable("screen.noobs_container_searcher.locate_all").getString();
 				allW = font.width(all) + 28;
@@ -872,7 +882,11 @@ public final class ContainerSearchScreen extends CompatScreen {
 		if (viewingKey != null || minecraft == null || minecraft.level == null) {
 			return List.of();
 		}
-		return ModSettings.get().locationsFor(ContainerSearcherClient.serverKey(minecraft));
+		// serverKey is not free and every result row asks, so look it up once per frame (reset in renderContent/rebuild)
+		if (frameLocations == null) {
+			frameLocations = ModSettings.get().locationsFor(ContainerSearcherClient.serverKey(minecraft));
+		}
+		return frameLocations;
 	}
 
 	// closest loc whose radius covers the container, null if none (or coloring is off)
@@ -2372,6 +2386,8 @@ public final class ContainerSearchScreen extends CompatScreen {
 
 	private void rebuild() {
 		typeMatchCache.clear();
+		multiRow = null;
+		frameLocations = null;
 		rows.clear();
 		filters.clear();
 		containerTypes.clear();
@@ -2435,16 +2451,19 @@ public final class ContainerSearchScreen extends CompatScreen {
 			.thenComparing(filter -> filter.name.toLowerCase(Locale.ROOT)));
 		containerTypes.sort(Comparator.comparing(type -> type.name.toLowerCase(Locale.ROOT)));
 		Comparator<ResultRow> byName = Comparator
-			.comparing((ResultRow row) -> row.name.toLowerCase(Locale.ROOT))
+			.comparing((ResultRow row) -> row.lowerName)
 			.thenComparing(row -> row.record.dimension)
 			.thenComparingInt(row -> row.record.x)
 			.thenComparingInt(row -> row.record.y)
 			.thenComparingInt(row -> row.record.z);
-		rows.sort(sort == Sort.DISTANCE
-			? Comparator.comparingDouble((ResultRow row) -> {
+		if (sort == Sort.DISTANCE) {
+			for (ResultRow row : rows) {
 				double distance = distanceTo(row.record);
-				return distance < 0 ? Double.MAX_VALUE : distance;
-			}).thenComparing(byName)
+				row.sortDistance = distance < 0 ? Double.MAX_VALUE : distance;
+			}
+		}
+		rows.sort(sort == Sort.DISTANCE
+			? Comparator.comparingDouble((ResultRow row) -> row.sortDistance).thenComparing(byName)
 			: byName);
 		Set<String> containerIds = new LinkedHashSet<>();
 		for (ResultRow row : rows) {
@@ -2456,7 +2475,7 @@ public final class ContainerSearchScreen extends CompatScreen {
 	private List<ContainerRecord> recordsFor(ResultRow row) {
 		Map<String, ContainerRecord> matches = new HashMap<>();
 		for (ResultRow other : rows) {
-			if (itemVariantKey(other.item).equals(itemVariantKey(row.item))
+			if (other.variant.equals(row.variant)
 				&& isVillager(other.record) == isVillager(row.record)
 				&& (selectedFilter == null || passesFilter(other.item, selectedFilter))) {
 				matches.put(recordIdentity(other.record), other.record);
@@ -2676,10 +2695,12 @@ public final class ContainerSearchScreen extends CompatScreen {
 		if (record.containerType == null || record.containerType.isBlank()) {
 			return;
 		}
-		String name = containerName(record.containerType).getString();
-		ContainerTypeEntry entry = types.computeIfAbsent(containerTypeKey(record.containerType), ignored -> new ContainerTypeEntry(name));
-		entry.typeIds.add(record.containerType);
-		entry.searchText = normalizedSearch(entry.searchText + " " + record.containerType);
+		ContainerTypeEntry entry = types.computeIfAbsent(containerTypeKey(record.containerType),
+			ignored -> new ContainerTypeEntry(containerName(record.containerType).getString()));
+		// only the first record of each type extends the search text (was re-normalized for every record)
+		if (entry.typeIds.add(record.containerType)) {
+			entry.searchText = normalizedSearch(entry.searchText + " " + record.containerType);
+		}
 		entry.count += itemCount(record);
 	}
 
@@ -3001,6 +3022,9 @@ public final class ContainerSearchScreen extends CompatScreen {
 		private final ContainerItemRecord item;
 		private final String itemId;
 		private final String name;
+		private final String lowerName;
+		private final String variant;
+		private double sortDistance;
 		private int count;
 
 		private ResultRow(ContainerRecord record, ContainerItemRecord item) {
@@ -3008,6 +3032,8 @@ public final class ContainerSearchScreen extends CompatScreen {
 			this.item = item;
 			this.itemId = item.itemId;
 			this.name = localizedItemName(item);
+			this.lowerName = this.name.toLowerCase(Locale.ROOT);
+			this.variant = itemVariantKey(item);
 			this.count = item.count;
 		}
 

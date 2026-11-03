@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.22
+
+### Fixed
+- Fixed the search window lagging when scrolling, hovering, or changing filters with many containers. Thanks to milesgglazer_ for reporting this bug!
+
 ## 1.21
 
 ### Fixed
