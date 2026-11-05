@@ -594,10 +594,37 @@ public final class ContainerSearcherClient {
 		record.items = contents;
 		record.entries = entries;
 		DATABASE.put(record, openDuplicatePos);
+		ProtectClient.shareContainer(record);
 		syncOtherEnderChests(record);
 		lastCapturedContainerId = menu.containerId;
 		lastCapturedFingerprint = fingerprint;
 		LOGGER.debug("{} konumundaki konteyner kaydedildi", openContainerPos);
+	}
+
+	// a friend saw this container (sent through the chest sharing plugin); keep it unless we saw it more recently ourselves
+	static void receiveShared(ContainerRecord record, String by, long sentAt) {
+		Minecraft client = Minecraft.getInstance();
+		if (client.level == null || record.containerType == null || isEnderChest(record) || record.entityUuid != null) {
+			return;
+		}
+		record.server = serverKey(client);
+		record.events = new ArrayList<>();
+		record.sharedBy = by == null || by.isBlank() ? null : by;
+		if (sentAt > 0L) {
+			record.updatedAt = sentAt;
+		}
+		BlockPos pos = new BlockPos(record.x, record.y, record.z);
+		BlockPos other = record.secondaryX == null || record.secondaryY == null || record.secondaryZ == null
+			? null : new BlockPos(record.secondaryX, record.secondaryY, record.secondaryZ);
+		ContainerRecord known = DATABASE.find(record.server, record.dimension, pos);
+		if (known == null && other != null) {
+			known = DATABASE.find(record.server, record.dimension, other);
+		}
+		if (known != null && known.updatedAt >= record.updatedAt) {
+			return;
+		}
+		DATABASE.put(record, other);
+		LOGGER.debug("Container at {} synced from {}", pos, by);
 	}
 
 	// every ender chest shows the same inventory, so all the ones we know get the contents we just saw

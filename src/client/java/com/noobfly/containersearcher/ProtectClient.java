@@ -173,6 +173,7 @@ public final class ProtectClient {
 			}
 			case "state" -> readState(in);
 			case "chest" -> readChest(in);
+			case "sync" -> readSync(in);
 			case "result" -> {
 				message = string(in, "msg");
 				messageOk = in.has("ok") && in.get("ok").getAsBoolean();
@@ -202,6 +203,43 @@ public final class ProtectClient {
 			: null;
 		friends = strings(in, "friends");
 		online = strings(in, "online");
+	}
+
+	// ---- container sync with friends ----
+
+	// we just saw this container: tell the plugin, it passes the contents on to friends and group members
+	public static void shareContainer(ContainerRecord record) {
+		if (!available || !ModSettings.get().shareWithFriends || record.entityUuid != null) {
+			return;
+		}
+		String data = ContainerShare.encode(record);
+		if (data == null) {
+			return;
+		}
+		JsonObject out = withPos("sync", new BlockPos(record.x, record.y, record.z));
+		out.addProperty("dim", record.dimension);
+		out.addProperty("data", data);
+		send(out);
+	}
+
+	// a friend opened a container we may open too
+	private static void readSync(JsonObject in) {
+		JsonArray p = array(in, "pos");
+		String data = string(in, "data");
+		if (p.size() != 3 || data.isEmpty() || string(in, "dim").isEmpty()) {
+			return;
+		}
+		ContainerRecord record = ContainerShare.decode(data);
+		if (record == null) {
+			return;
+		}
+		record.dimension = string(in, "dim");
+		record.x = p.get(0).getAsInt();
+		record.y = p.get(1).getAsInt();
+		record.z = p.get(2).getAsInt();
+		String by = string(in, "by");
+		long sentAt = in.has("ts") && in.get("ts").isJsonPrimitive() ? in.get("ts").getAsLong() : 0L;
+		net.minecraft.client.Minecraft.getInstance().execute(() -> ContainerSearcherClient.receiveShared(record, by, sentAt));
 	}
 
 	private static void readChest(JsonObject in) {

@@ -36,6 +36,8 @@ public final class ModSettings {
 	public boolean locationColors = true;
 	public boolean trackChanges = true;
 	public boolean targetArrows = true;
+	// send what we see in containers to friends and group members (needs the chest sharing plugin on the server)
+	public boolean shareWithFriends = true;
 	public int highlightSeconds = 60;
 	// which result buttons show, at least one stays on
 	public boolean locateOneButton = true;
