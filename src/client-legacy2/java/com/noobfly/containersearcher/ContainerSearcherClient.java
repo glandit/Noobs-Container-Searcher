@@ -80,6 +80,8 @@ public final class ContainerSearcherClient {
 	private static BlockPos lookedContainerPos;
 	private static BlockPos lookedDuplicatePos;
 	private static long lookedContainerExpiresAt;
+	// last real container that was open, used as the chest for the "Group" tab when nothing is looked at
+	private static BlockPos lastOpenedContainerPos;
 	private static UUID pendingVillagerUuid;
 	private static long pendingVillagerExpiresAt;
 	private static int lastCapturedContainerId = -1;
@@ -93,6 +95,18 @@ public final class ContainerSearcherClient {
 		SEARCH.register();
 		Highlights.register(HIGHLIGHTS);
 		Platform.registerEvents(this);
+		ProtectClient.init();
+	}
+
+	// chest the "Group" tab manages: the container under the crosshair, otherwise the last one that was open
+	public static BlockPos protectTarget(Minecraft client) {
+		if (client.player != null && client.level != null) {
+			BlockPos pos = pickedContainerPos(client.player, client.level);
+			if (pos != null) {
+				return canonicalContainerPos(pos, client.level.getBlockState(pos));
+			}
+		}
+		return lastOpenedContainerPos;
 	}
 
 	// right-click on a block
@@ -519,6 +533,7 @@ public final class ContainerSearcherClient {
 		if (openContainerPos == null) {
 			return;
 		}
+		lastOpenedContainerPos = openContainerPos;
 
 		Map<String, Integer> contents = new LinkedHashMap<>();
 		List<ContainerItemRecord> entries = new ArrayList<>();

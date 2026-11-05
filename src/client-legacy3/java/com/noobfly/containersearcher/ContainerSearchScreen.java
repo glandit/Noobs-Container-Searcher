@@ -40,7 +40,7 @@ import java.util.Set;
 import java.util.function.DoubleConsumer;
 
 public final class ContainerSearchScreen extends CompatScreen {
-	private enum Tab { SEARCH, REROLL, LOCATIONS, SETTINGS }
+	private enum Tab { SEARCH, REROLL, LOCATIONS, GROUP, SETTINGS }
 
 	private enum Sort { NAME, DISTANCE }
 
@@ -199,6 +199,13 @@ public final class ContainerSearchScreen extends CompatScreen {
 	private int mx = -1;
 	private int my = -1;
 	private boolean ctrlDown;
+	// Group tab: the chest looked at when the screen opened (or the last opened one), and its input fields
+	private final net.minecraft.core.BlockPos protectTarget;
+	private EditBox shareBox;
+	private EditBox groupNameBox;
+	private EditBox inviteBox;
+	private EditBox friendBox;
+	private final Map<EditBox, Runnable> submitActions = new HashMap<>();
 
 	public ContainerSearchScreen(SearchController controller, List<ContainerRecord> records) {
 		super(Component.translatable("screen.noobs_container_searcher.title"));
@@ -207,6 +214,10 @@ public final class ContainerSearchScreen extends CompatScreen {
 		ITEM_NAME_CACHE.clear();
 		ENCHANTMENT_NAME_CACHE.clear();
 		this.reroll = ContainerSearcherClient.librarianReroll();
+		this.protectTarget = ContainerSearcherClient.protectTarget(Minecraft.getInstance());
+		if (ProtectClient.available()) {
+			ProtectClient.requestInfo(protectTarget);
+		}
 		rebuild();
 	}
 
@@ -269,8 +280,17 @@ public final class ContainerSearchScreen extends CompatScreen {
 			}
 		});
 
+		shareBox = newBox(Component.translatable("screen.noobs_container_searcher.group_share"), "screen.noobs_container_searcher.group_player_hint");
+		groupNameBox = newBox(Component.translatable("screen.noobs_container_searcher.group_create"), "screen.noobs_container_searcher.group_name_hint");
+		inviteBox = newBox(Component.translatable("screen.noobs_container_searcher.group_invite_button"), "screen.noobs_container_searcher.group_player_hint");
+		friendBox = newBox(Component.translatable("screen.noobs_container_searcher.group_friends_add"), "screen.noobs_container_searcher.group_player_hint");
+		for (EditBox box : List.of(shareBox, groupNameBox, inviteBox, friendBox)) {
+			box.setMaxLength(16);
+		}
+
 		loadEnchantments();
-		switchTab(Tab.SEARCH);
+		// coming back from a confirm dialog keeps the Group tab open
+		switchTab(tab == Tab.GROUP ? Tab.GROUP : Tab.SEARCH);
 	}
 
 	// pick the biggest gui scale that still leaves FIT_WIDTH x FIT_HEIGHT, put the player's scale back on close
@@ -328,6 +348,13 @@ public final class ContainerSearchScreen extends CompatScreen {
 		filterSearchBox.setVisible(tab == Tab.SEARCH);
 		rerollSearchBox.setVisible(tab == Tab.REROLL);
 		locationNameBox.setVisible(tab == Tab.LOCATIONS);
+		// the Group tab shows its boxes itself, depending on what the server sent
+		for (EditBox box : List.of(shareBox, groupNameBox, inviteBox, friendBox)) {
+			box.setVisible(false);
+		}
+		if (tab == Tab.GROUP) {
+			ProtectClient.requestInfo(protectTarget);
+		}
 		closeEditor();
 		numberEdit = NumberEdit.NONE;
 		numberBox.setVisible(false);
@@ -343,6 +370,10 @@ public final class ContainerSearchScreen extends CompatScreen {
 		hexBox.setFocused(target == hexBox);
 		iconSearchBox.setFocused(target == iconSearchBox);
 		numberBox.setFocused(target == numberBox);
+		shareBox.setFocused(target == shareBox);
+		groupNameBox.setFocused(target == groupNameBox);
+		inviteBox.setFocused(target == inviteBox);
+		friendBox.setFocused(target == friendBox);
 		setFocused(target);
 	}
 
@@ -379,11 +410,17 @@ public final class ContainerSearchScreen extends CompatScreen {
 			rerollSearchBox.setVisible(false);
 			locationNameBox.setVisible(false);
 			renderDisabledNotice(g, bx, by, bw, bh, footerY, true);
-		} else switch (tab) {
-			case SEARCH -> renderSearchTab(g, bx, by, bw, bh, footerY);
-			case REROLL -> renderRerollTab(g, bx, by, bw, bh, footerY);
-			case LOCATIONS -> renderLocationsTab(g, bx, by, bw, bh, footerY);
-			case SETTINGS -> renderSettingsTab(g, bx, by, bw, bh, footerY);
+		} else {
+			if (tab == Tab.GROUP && !ProtectClient.available()) {
+				switchTab(Tab.SEARCH);
+			}
+			switch (tab) {
+				case SEARCH -> renderSearchTab(g, bx, by, bw, bh, footerY);
+				case REROLL -> renderRerollTab(g, bx, by, bw, bh, footerY);
+				case LOCATIONS -> renderLocationsTab(g, bx, by, bw, bh, footerY);
+				case GROUP -> renderGroupTab(g, bx, by, bw, bh, footerY);
+				case SETTINGS -> renderSettingsTab(g, bx, by, bw, bh, footerY);
+			}
 		}
 		g.disableScissor();
 		renderWidgets(mouseX, mouseY, partialTick);
@@ -402,6 +439,11 @@ public final class ContainerSearchScreen extends CompatScreen {
 		tx = tabButton(g, Tab.REROLL, Component.translatable("screen.noobs_container_searcher.tab_reroll"), tx, top,
 			reroll.state() != LibrarianRerollController.State.IDLE);
 		tx = tabButton(g, Tab.LOCATIONS, Component.translatable("screen.noobs_container_searcher.tab_locations"), tx, top, false);
+		// only on servers running the chest sharing plugin; the dot means an invitation is waiting
+		if (ProtectClient.available()) {
+			tx = tabButton(g, Tab.GROUP, Component.translatable("screen.noobs_container_searcher.tab_group"), tx, top,
+				ProtectClient.invite() != null);
+		}
 		tabButton(g, Tab.SETTINGS, Component.translatable("screen.noobs_container_searcher.tab_settings"), tx, top, false);
 
 		int cx = left + pw - 30;
@@ -1651,6 +1693,252 @@ public final class ContainerSearchScreen extends CompatScreen {
 		openEditor(loc);
 	}
 
+	// ---- Group tab: chest sharing through the optional server plugin ----
+
+	private static String gt(String key, Object... args) {
+		return Component.translatable("screen.noobs_container_searcher.group_" + key, args).getString();
+	}
+
+	private void renderGroupTab(Gfx g, int bx, int by, int bw, int bh, int footerY) {
+		submitActions.clear();
+		for (EditBox box : List.of(shareBox, groupNameBox, inviteBox, friendBox)) {
+			box.setVisible(false);
+		}
+		String status = ProtectClient.message();
+		if (status != null) {
+			g.text(font, trim(status, panelWidth() - 24), panelLeft() + 12, footerY + 7, ProtectClient.messageOk() ? SUCCESS : DANGER);
+		} else {
+			footer(g, footerY, gt("footer"), "");
+		}
+		int gap = 16;
+		int colW = (Math.min(bw, 760) - gap) / 2;
+		int y = by + 6;
+		renderChestSection(g, bx, y, colW);
+		int rx = bx + colW + gap;
+		int afterGroup = renderGroupSection(g, rx, y, colW);
+		renderFriendsSection(g, rx, afterGroup + 10, colW);
+	}
+
+	private int section(Gfx g, String key, int x, int y, int w) {
+		g.text(font, gt(key).toUpperCase(Locale.ROOT), x, y, TEXT_MUTED);
+		g.fill(x, y + 11, x + w, y + 12, BORDER);
+		return y + 17;
+	}
+
+	private void renderChestSection(Gfx g, int x, int y, int w) {
+		y = section(g, "chest", x, y, w);
+		net.minecraft.core.BlockPos pos = protectTarget;
+		if (pos == null || minecraft.level == null) {
+			g.text(font, trim(gt("chest_none"), w), x, y, TEXT_MUTED);
+			return;
+		}
+		var state = minecraft.level.getBlockState(pos);
+		card(g, x, y, w, 26, SURFACE, BORDER);
+		g.fakeItem(new ItemStack(state.getBlock().asItem()), x + 5, y + 5);
+		g.text(font, trim(state.getBlock().getName().getString(), w - 32), x + 26, y + 4, TEXT_PRIMARY);
+		g.text(font, pos.getX() + " " + pos.getY() + " " + pos.getZ(), x + 26, y + 15, TEXT_MUTED);
+		y += 32;
+
+		ProtectClient.Chest chest = ProtectClient.chest(pos);
+		if (chest == null) {
+			g.text(font, trim(gt("loading"), w), x, y, TEXT_MUTED);
+			return;
+		}
+		switch (chest.status()) {
+			case "unlocked" -> {
+				g.text(font, trim(gt("chest_unlocked"), w), x, y, WARNING);
+				y += 14;
+				if (!chest.claimable()) {
+					g.text(font, trim(gt("chest_too_far"), w), x, y, TEXT_MUTED);
+					return;
+				}
+				actionButton(g, x, y, gt("lock"), false, () -> ProtectClient.lock(pos));
+				y += 26;
+				renderShareInput(g, pos, chest, x, y, w);
+			}
+			case "locked" -> renderLockedChest(g, pos, chest, x, y, w);
+			default -> g.text(font, trim(gt("chest_missing"), w), x, y, TEXT_MUTED);
+		}
+	}
+
+	private void renderLockedChest(Gfx g, net.minecraft.core.BlockPos pos, ProtectClient.Chest chest, int x, int y, int w) {
+		g.text(font, trim(chest.mine() ? gt("chest_mine") : gt("chest_owner", chest.owner()), w), x, y, chest.mine() ? SUCCESS : TEXT_PRIMARY);
+		y += 12;
+		if (!chest.mine()) {
+			String access = chest.access() ? gt("access_" + chest.reason()) : gt("access_none");
+			g.text(font, trim(access, w), x, y, chest.access() ? TEXT_SECONDARY : DANGER);
+			y += 12;
+		}
+		if (!chest.ownerGroup().isEmpty()) {
+			g.text(font, trim(gt("chest_group", chest.ownerGroup()), w), x, y, TEXT_MUTED);
+			y += 12;
+		}
+		if (chest.access()) {
+			y += 6;
+			g.text(font, gt("shared_with"), x, y, TEXT_SECONDARY);
+			y += 12;
+			List<ChipSpec> shared = new ArrayList<>();
+			for (String name : chest.shared()) {
+				shared.add(new ChipSpec(name, -1, 0, false, chest.manage(),
+					chest.manage() ? () -> ProtectClient.unshare(pos, name) : () -> { }));
+			}
+			if (shared.isEmpty()) {
+				g.text(font, gt("nobody"), x, y + 3, TEXT_MUTED);
+				y += 16;
+			} else {
+				y += flowChips(g, shared, x, y, w, true) + 6;
+			}
+		}
+		if (!chest.manage()) {
+			return;
+		}
+		y += 4;
+		y = renderShareInput(g, pos, chest, x, y, w);
+		actionButton(g, x, y + 4, gt("unlock"), true, () -> confirm("unlock_title", "unlock_message", null, () -> ProtectClient.unlock(pos)));
+	}
+
+	// name field + "Share" button, plus one click chips for everyone online
+	private int renderShareInput(Gfx g, net.minecraft.core.BlockPos pos, ProtectClient.Chest chest, int x, int y, int w) {
+		inputRow(g, shareBox, x, y, w, gt("share"), name -> ProtectClient.share(pos, name));
+		y += 26;
+		List<ChipSpec> quick = new ArrayList<>();
+		for (String name : ProtectClient.online()) {
+			if (!chest.shared().contains(name) && !name.equalsIgnoreCase(chest.owner())) {
+				quick.add(new ChipSpec("+ " + name, -1, 0, false, false, () -> ProtectClient.share(pos, name)));
+			}
+		}
+		if (!quick.isEmpty()) {
+			y += flowChips(g, quick, x, y, w, true) + 6;
+		}
+		return y;
+	}
+
+	private int renderGroupSection(Gfx g, int x, int y, int w) {
+		y = section(g, "title", x, y, w);
+		ProtectClient.Invite invite = ProtectClient.invite();
+		if (invite != null) {
+			card(g, x, y, w, 46, ACCENT_BG, ACCENT);
+			g.text(font, trim(gt("invite", invite.from(), invite.group()), w - 16), x + 8, y + 7, TEXT_PRIMARY);
+			int bx = x + 8;
+			bx += actionButton(g, bx, y + 22, gt("accept"), false, () -> ProtectClient.group("accept", null)) + 6;
+			actionButton(g, bx, y + 22, gt("decline"), true, () -> ProtectClient.group("decline", null));
+			y += 54;
+		}
+
+		ProtectClient.Group group = ProtectClient.group();
+		if (group == null) {
+			g.text(font, trim(gt("none"), w), x, y, TEXT_SECONDARY);
+			y += 14;
+			inputRow(g, groupNameBox, x, y, w, gt("create"), name -> ProtectClient.group("create", name));
+			return y + 26;
+		}
+
+		Component name = Component.literal(group.name()).withStyle(ChatFormatting.BOLD);
+		g.text(font, name, x, y, TEXT_PRIMARY);
+		g.text(font, gt("members", group.members().size()), x + font.width(name) + 6, y, TEXT_MUTED);
+		y += 14;
+		List<ChipSpec> members = new ArrayList<>();
+		List<String> memberNames = new ArrayList<>();
+		for (ProtectClient.Member member : group.members()) {
+			memberNames.add(member.name());
+			boolean kickable = group.meLeader() && !member.me();
+			String label = member.name() + (member.leader() ? " ★" : "") + (member.me() ? " " + gt("you") : "");
+			members.add(new ChipSpec(label, -1, member.online() ? SUCCESS : TEXT_MUTED, false, kickable,
+				kickable ? () -> confirm("kick_title", "kick_message", member.name(), () -> ProtectClient.group("kick", member.name())) : () -> { }));
+		}
+		y += flowChips(g, members, x, y, w, true) + 8;
+
+		if (group.meLeader()) {
+			inputRow(g, inviteBox, x, y, w, gt("invite_button"), player -> ProtectClient.group("invite", player));
+			y += 26;
+			List<ChipSpec> quick = new ArrayList<>();
+			for (String player : ProtectClient.online()) {
+				if (!memberNames.contains(player)) {
+					quick.add(new ChipSpec("+ " + player, -1, 0, false, false, () -> ProtectClient.group("invite", player)));
+				}
+			}
+			if (!quick.isEmpty()) {
+				y += flowChips(g, quick, x, y, w, true) + 6;
+			}
+		}
+		int bx = x;
+		bx += actionButton(g, bx, y, gt("leave"), true, () -> confirm("leave_title", "leave_message", group.name(), () -> ProtectClient.group("leave", null))) + 6;
+		if (group.meLeader()) {
+			actionButton(g, bx, y, gt("disband"), true, () -> confirm("disband_title", "disband_message", group.name(), () -> ProtectClient.group("disband", null)));
+		}
+		return y + 22;
+	}
+
+	private void renderFriendsSection(Gfx g, int x, int y, int w) {
+		y = section(g, "friends", x, y, w);
+		g.text(font, trim(gt("friends_hint"), w), x, y, TEXT_MUTED);
+		y += 13;
+		List<ChipSpec> friends = new ArrayList<>();
+		for (String name : ProtectClient.friends()) {
+			friends.add(new ChipSpec(name, -1, 0, false, true, () -> ProtectClient.untrust(name)));
+		}
+		if (friends.isEmpty()) {
+			g.text(font, gt("nobody"), x, y + 3, TEXT_MUTED);
+			y += 16;
+		} else {
+			y += flowChips(g, friends, x, y, w, true) + 6;
+		}
+		inputRow(g, friendBox, x, y, w, gt("friends_add"), ProtectClient::trust);
+	}
+
+	// returns the button width so buttons can be chained
+	private int actionButton(Gfx g, int x, int y, String label, boolean danger, Runnable action) {
+		int w = font.width(label) + 24;
+		drawButton(g, x, y, w, 18, label, danger ? DANGER : ACCENT, danger ? DANGER_HOVER : ACCENT_HOVER, danger ? DANGER_DARK : ACCENT_DARK, true, null);
+		hit(x, y, w, 18, action);
+		return w;
+	}
+
+	private void inputRow(Gfx g, EditBox box, int x, int y, int w, String label, java.util.function.Consumer<String> submit) {
+		int buttonW = font.width(label) + 24;
+		int fieldW = w - buttonW - 6;
+		box.setVisible(true);
+		card(g, x, y, fieldW, 20, INPUT_BG, box.isFocused() ? ACCENT : BORDER);
+		box.setX(x + 7);
+		box.setY(y + 6);
+		box.setWidth(fieldW - 14);
+		box.setHeight(10);
+		hit(x, y, fieldW, 20, () -> focusBox(box));
+		Runnable run = () -> {
+			String value = box.getValue().trim();
+			if (!value.isEmpty()) {
+				submit.accept(value);
+				box.setValue("");
+			}
+		};
+		submitActions.put(box, run);
+		drawButton(g, x + w - buttonW, y, buttonW, 20, label, ACCENT, ACCENT_HOVER, ACCENT_DARK, true, null);
+		hit(x + w - buttonW, y, buttonW, 20, run);
+	}
+
+	private boolean submitFocused() {
+		for (Map.Entry<EditBox, Runnable> entry : submitActions.entrySet()) {
+			if (entry.getKey().isFocused() && entry.getKey().isVisible()) {
+				entry.getValue().run();
+				return true;
+			}
+		}
+		return false;
+	}
+
+	private void confirm(String titleKey, String messageKey, String arg, Runnable action) {
+		Compat.setScreen(minecraft, new ConfirmScreen(
+			confirmed -> {
+				if (confirmed) {
+					action.run();
+				}
+				Compat.setScreen(minecraft, this);
+			},
+			Component.literal(gt(titleKey)),
+			Component.literal(arg == null ? gt(messageKey) : gt(messageKey, arg))
+		));
+	}
+
 	private void renderSettingsTab(Gfx g, int bx, int by, int bw, int bh, int footerY) {
 		if (serversView) {
 			renderServersView(g, bx, by, bw, bh, footerY);
@@ -2261,6 +2549,9 @@ public final class ContainerSearchScreen extends CompatScreen {
 		if (tab == Tab.LOCATIONS && (press.test(locationNameBox) || press.test(radiusBox) || press.test(hexBox) || press.test(iconSearchBox))) {
 			return true;
 		}
+		if (tab == Tab.GROUP && (press.test(shareBox) || press.test(groupNameBox) || press.test(inviteBox) || press.test(friendBox))) {
+			return true;
+		}
 		return tab == Tab.REROLL && press.test(rerollSearchBox);
 	}
 
@@ -2286,6 +2577,11 @@ public final class ContainerSearchScreen extends CompatScreen {
 
 	@Override
 	public boolean keyPressed(int keyCode, int scanCode, int modifiers) {
+		// Enter in a Group tab field presses the button next to it
+		if (tab == Tab.GROUP && (keyCode == com.mojang.blaze3d.platform.InputConstants.KEY_RETURN
+			|| keyCode == com.mojang.blaze3d.platform.InputConstants.KEY_NUMPADENTER) && submitFocused()) {
+			return true;
+		}
 		return editKey(box -> box.keyPressed(keyCode, scanCode, modifiers)) || super.keyPressed(keyCode, scanCode, modifiers);
 	}
 	// <</INPUT>>
