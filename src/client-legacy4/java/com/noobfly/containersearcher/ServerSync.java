@@ -29,6 +29,13 @@ import java.util.Set;
 final class ServerSync {
 	// decoded item NBT per stack, more is not a real item
 	private static final long MAX_ITEM_BYTES = 2L * 1024 * 1024;
+	// limits against a server that sends nonsense: chests per connection, stacks per chest, text lengths
+	private static final int MAX_SYNCED_CHESTS = 50_000;
+	private static final int MAX_STACKS = 64;
+	private static final int MAX_NAME_CHARS = 64;
+	private static final java.util.regex.Pattern DIMENSION = java.util.regex.Pattern.compile("[a-z0-9_.-]{1,64}:[a-z0-9_./-]{1,64}");
+	// chests the server sent since we joined, to stay under MAX_SYNCED_CHESTS
+	private static final Set<String> SYNCED = new HashSet<>();
 
 	private static Set<String> receivedKeys;
 	private static String syncServer;
@@ -81,6 +88,7 @@ final class ServerSync {
 	static void reset() {
 		receivedKeys = null;
 		syncServer = null;
+		SYNCED.clear();
 	}
 
 	static void container(JsonObject in) {
@@ -128,8 +136,16 @@ final class ServerSync {
 		BlockPos pos = pos(in, "pos");
 		String dimension = string(in, "dim");
 		String type = string(in, "type");
-		if (client.level == null || pos == null || dimension == null || type == null) {
+		if (client.level == null || pos == null || dimension == null || type == null
+			|| !DIMENSION.matcher(dimension).matches() || type.length() > MAX_NAME_CHARS) {
 			return null;
+		}
+		String key = dimension + " " + pos.getX() + " " + pos.getY() + " " + pos.getZ();
+		if (!SYNCED.contains(key)) {
+			if (SYNCED.size() >= MAX_SYNCED_CHESTS) {
+				return null;
+			}
+			SYNCED.add(key);
 		}
 		ContainerRecord record = new ContainerRecord();
 		record.server = ContainerSearcherClient.serverKey(client);
@@ -146,15 +162,16 @@ final class ServerSync {
 		record.containerType = type;
 		record.updatedAt = in.has("at") ? in.get("at").getAsLong() : System.currentTimeMillis();
 		String owner = string(in, "owner");
-		record.serverOwner = owner == null ? "?" : owner;
+		record.serverOwner = owner == null || owner.isEmpty() ? "?" : owner.length() > MAX_NAME_CHARS ? owner.substring(0, MAX_NAME_CHARS) : owner;
 		record.serverMine = in.has("mine") && in.get("mine").getAsBoolean();
 
 		Map<String, Integer> contents = new LinkedHashMap<>();
 		List<ContainerItemRecord> entries = new ArrayList<>();
 		JsonElement items = in.get("items");
 		if (items != null && items.isJsonArray()) {
+			int stacks = 0;
 			for (JsonElement element : items.getAsJsonArray()) {
-				if (element.isJsonObject()) {
+				if (element.isJsonObject() && stacks++ < MAX_STACKS) {
 					addItem(client, element.getAsJsonObject(), contents, entries);
 				}
 			}
@@ -176,7 +193,7 @@ final class ServerSync {
 		}
 		// the server runs another Minecraft version or sent no data: at least the item id and count
 		String itemId = string(in, "id");
-		if (itemId == null) {
+		if (itemId == null || itemId.length() > 2 * MAX_NAME_CHARS) {
 			return;
 		}
 		int count = in.has("n") ? Math.max(1, in.get("n").getAsInt()) : 1;

@@ -22,6 +22,8 @@ public final class ProtectClient {
 	// long messages come in pieces: "#frag <id> <index> <count>\n<piece>"
 	private static final String FRAGMENT = "#frag ";
 	private static final int MAX_FRAGMENTS = 256;
+	// all unfinished pieces together, a real chest message is far smaller
+	private static final int MAX_BUFFERED_CHARS = 8_000_000;
 
 	public record Member(String name, boolean online, boolean leader, boolean me) { }
 
@@ -41,6 +43,7 @@ public final class ProtectClient {
 	private static boolean messageOk;
 	private static long messageAt;
 	private static final Map<String, String[]> PIECES = new HashMap<>();
+	private static int bufferedChars;
 
 	private ProtectClient() {
 	}
@@ -142,7 +145,7 @@ public final class ProtectClient {
 		friendOf = List.of();
 		online = List.of();
 		message = null;
-		PIECES.clear();
+		dropPieces();
 		ServerSync.reset();
 	}
 
@@ -177,21 +180,43 @@ public final class ProtectClient {
 			return null;
 		}
 		if (!PIECES.containsKey(head[0]) && PIECES.size() >= 8) {
-			PIECES.clear(); // pieces of messages that never finished
+			dropPieces(); // pieces of messages that never finished
 		}
 		String[] pieces = PIECES.computeIfAbsent(head[0], ignored -> new String[count]);
-		if (pieces.length != count) {
-			PIECES.remove(head[0]);
+		if (pieces.length != count || pieces[index] != null) {
+			dropPieces(head[0]);
 			return null;
 		}
-		pieces[index] = piece.substring(newline + 1);
-		for (String part : pieces) {
-			if (part == null) {
+		String part = piece.substring(newline + 1);
+		if (bufferedChars + part.length() > MAX_BUFFERED_CHARS) {
+			dropPieces();
+			return null;
+		}
+		pieces[index] = part;
+		bufferedChars += part.length();
+		for (String done : pieces) {
+			if (done == null) {
 				return null;
 			}
 		}
-		PIECES.remove(head[0]);
+		dropPieces(head[0]);
 		return String.join("", pieces);
+	}
+
+	private static void dropPieces(String id) {
+		String[] pieces = PIECES.remove(id);
+		if (pieces != null) {
+			for (String part : pieces) {
+				if (part != null) {
+					bufferedChars -= part.length();
+				}
+			}
+		}
+	}
+
+	private static void dropPieces() {
+		PIECES.clear();
+		bufferedChars = 0;
 	}
 
 	private static void handle(String json) {
