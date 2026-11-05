@@ -24,4 +24,7 @@ public final class ContainerRecord {
 	public boolean halfLost;
 	// ender chest block was broken, the items are still the player's own
 	public boolean blockGone;
+	// synced by the server plugin: owner name (null when we only saw it ourselves) and whether it is ours
+	public String serverOwner;
+	public boolean serverMine;
 }

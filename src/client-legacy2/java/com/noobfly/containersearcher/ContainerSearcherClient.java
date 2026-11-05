@@ -81,7 +81,6 @@ public final class ContainerSearcherClient {
 	private static BlockPos lookedDuplicatePos;
 	private static long lookedContainerExpiresAt;
 	// last real container that was open, used as the chest for the "Group" tab when nothing is looked at
-	private static BlockPos lastOpenedContainerPos;
 	private static UUID pendingVillagerUuid;
 	private static long pendingVillagerExpiresAt;
 	private static int lastCapturedContainerId = -1;
@@ -96,17 +95,6 @@ public final class ContainerSearcherClient {
 		Highlights.register(HIGHLIGHTS);
 		Platform.registerEvents(this);
 		ProtectClient.init();
-	}
-
-	// chest the "Group" tab manages: the container under the crosshair, otherwise the last one that was open
-	public static BlockPos protectTarget(Minecraft client) {
-		if (client.player != null && client.level != null) {
-			BlockPos pos = pickedContainerPos(client.player, client.level);
-			if (pos != null) {
-				return canonicalContainerPos(pos, client.level.getBlockState(pos));
-			}
-		}
-		return lastOpenedContainerPos;
 	}
 
 	// right-click on a block
@@ -533,7 +521,6 @@ public final class ContainerSearcherClient {
 		if (openContainerPos == null) {
 			return;
 		}
-		lastOpenedContainerPos = openContainerPos;
 
 		Map<String, Integer> contents = new LinkedHashMap<>();
 		List<ContainerItemRecord> entries = new ArrayList<>();
@@ -592,6 +579,12 @@ public final class ContainerSearcherClient {
 		record.updatedAt = System.currentTimeMillis();
 		record.items = contents;
 		record.entries = entries;
+		// keep whose chest the server says it is, the server sends its own update after closing
+		ContainerRecord known = DATABASE.find(record.server, record.dimension, openContainerPos);
+		if (known != null && known.serverOwner != null) {
+			record.serverOwner = known.serverOwner;
+			record.serverMine = known.serverMine;
+		}
 		DATABASE.put(record, openDuplicatePos);
 		syncOtherEnderChests(record);
 		lastCapturedContainerId = menu.containerId;
@@ -701,7 +694,7 @@ public final class ContainerSearcherClient {
 	}
 
 	// items packed inside a shulker box count as being in this container too, tagged with the box name
-	private static int addShulkerContents(Minecraft client, ItemStack box, Map<String, Integer> contents, List<ContainerItemRecord> entries) {
+	static int addShulkerContents(Minecraft client, ItemStack box, Map<String, Integer> contents, List<ContainerItemRecord> entries) {
 		ItemContainerContents packed = box.get(DataComponents.CONTAINER);
 		if (packed == null) {
 			return 0;
@@ -725,7 +718,7 @@ public final class ContainerSearcherClient {
 		return hash;
 	}
 
-	private static ContainerItemRecord itemRecord(Minecraft client, ItemStack stack, String itemId) {
+	static ContainerItemRecord itemRecord(Minecraft client, ItemStack stack, String itemId) {
 		ContainerItemRecord record = new ContainerItemRecord();
 		record.itemId = itemId;
 		record.stackData = encodeStack(client, stack);
@@ -886,6 +879,19 @@ public final class ContainerSearcherClient {
 
 	public static List<ContainerRecord> knownRecords(Minecraft client) {
 		return DATABASE.allForServer(serverKey(client));
+	}
+
+	static ContainerDatabase database() {
+		return DATABASE;
+	}
+
+	// a synced container is gone, so is its highlight
+	static void forgetHighlight(ContainerRecord record) {
+		HIGHLIGHTS.removeAt(new BlockPos(record.x, record.y, record.z));
+		BlockPos secondaryPos = secondaryPos(record);
+		if (secondaryPos != null) {
+			HIGHLIGHTS.removeAt(secondaryPos);
+		}
 	}
 
 	public static boolean isVillagerHighlighted(Entity entity) {

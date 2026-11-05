@@ -83,6 +83,15 @@ public final class ContainerDatabase {
 		dirty = true;
 	}
 
+	// like put(record, obsoletePosition), saved later: for the many containers of a server sync
+	public void putDeferred(ContainerRecord record, BlockPos obsoletePosition) {
+		if (obsoletePosition != null) {
+			records.remove(key(record.server, record.dimension,
+				obsoletePosition.getX(), obsoletePosition.getY(), obsoletePosition.getZ()));
+		}
+		putDeferred(record);
+	}
+
 	public void flushNow() {
 		if (dirty) {
 			save();

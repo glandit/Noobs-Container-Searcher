@@ -5,19 +5,23 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.noobfly.containersearcher.compat.ProtectNet;
-import net.minecraft.core.BlockPos;
+import net.minecraft.client.Minecraft;
 
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
-// Talks to the optional "Noobs-Container-Searcher" Paper plugin, which locks chests and lets players share them
-// (single players, friends for all chests, groups). Everything here is only UI: the server checks every action.
+// Talks to the optional "Noobs-Container-Searcher" Paper plugin. The server remembers what is in every chest that
+// has an owner and sends it here, so the search finds it without opening the chests: our own chests, the ones of
+// our group and of players who added us as a friend. Groups and friends are managed in the Group tab.
 // The feature stays hidden on servers without the plugin.
 public final class ProtectClient {
 	public static final String CHANNEL = "noobs_container_searcher:protect";
-	private static final int VERSION = 1;
+	private static final int VERSION = 2;
+	// long messages come in pieces: "#frag <id> <index> <count>\n<piece>"
+	private static final String FRAGMENT = "#frag ";
+	private static final int MAX_FRAGMENTS = 256;
 
 	public record Member(String name, boolean online, boolean leader, boolean me) { }
 
@@ -25,23 +29,18 @@ public final class ProtectClient {
 
 	public record Invite(String group, String from) { }
 
-	public record Chest(String status, String owner, boolean mine, boolean manage, boolean access,
-		String reason, List<String> shared, String ownerGroup, boolean claimable) {
-		public boolean locked() {
-			return "locked".equals(status);
-		}
-	}
-
 	private static boolean helloSent;
 	private static boolean available;
+	private static boolean syncing;
 	private static Group group;
 	private static Invite invite;
 	private static List<String> friends = List.of();
+	private static List<String> friendOf = List.of();
 	private static List<String> online = List.of();
-	private static final Map<BlockPos, Chest> CHESTS = new HashMap<>();
 	private static String message;
 	private static boolean messageOk;
 	private static long messageAt;
+	private static final Map<String, String[]> PIECES = new HashMap<>();
 
 	private ProtectClient() {
 	}
@@ -56,6 +55,11 @@ public final class ProtectClient {
 		return available;
 	}
 
+	// true while the server is sending all chests
+	public static boolean syncing() {
+		return syncing;
+	}
+
 	public static Group group() {
 		return group;
 	}
@@ -68,12 +72,13 @@ public final class ProtectClient {
 		return friends;
 	}
 
-	public static List<String> online() {
-		return online;
+	// players who added us as a friend: we see their chests
+	public static List<String> friendOf() {
+		return friendOf;
 	}
 
-	public static Chest chest(BlockPos pos) {
-		return pos == null ? null : CHESTS.get(pos);
+	public static List<String> online() {
+		return online;
 	}
 
 	// last answer from the server, shown for a few seconds
@@ -87,30 +92,9 @@ public final class ProtectClient {
 
 	// ---- actions ----
 
-	public static void requestInfo(BlockPos pos) {
-		if (pos != null) {
-			send(withPos("info", pos));
-		}
-	}
-
-	public static void lock(BlockPos pos) {
-		send(withPos("lock", pos));
-	}
-
-	public static void unlock(BlockPos pos) {
-		send(withPos("unlock", pos));
-	}
-
-	public static void share(BlockPos pos, String player) {
-		JsonObject out = withPos("share", pos);
-		out.addProperty("player", player);
-		send(out);
-	}
-
-	public static void unshare(BlockPos pos, String player) {
-		JsonObject out = withPos("unshare", pos);
-		out.addProperty("player", player);
-		send(out);
+	// ask for all chests again
+	public static void requestSync() {
+		send(message("sync"));
 	}
 
 	public static void trust(String player) {
@@ -151,34 +135,99 @@ public final class ProtectClient {
 	private static void reset() {
 		helloSent = false;
 		available = false;
+		syncing = false;
 		group = null;
 		invite = null;
 		friends = List.of();
+		friendOf = List.of();
 		online = List.of();
-		CHESTS.clear();
 		message = null;
+		PIECES.clear();
+		ServerSync.reset();
 	}
 
-	private static void receive(String json) {
+	private static void receive(String text) {
+		Minecraft.getInstance().execute(() -> {
+			String json = text.startsWith(FRAGMENT) ? joinPieces(text) : text;
+			if (json != null) {
+				handle(json);
+			}
+		});
+	}
+
+	// returns the whole message once the last piece is in
+	private static String joinPieces(String piece) {
+		int newline = piece.indexOf('\n');
+		if (newline < 0) {
+			return null;
+		}
+		String[] head = piece.substring(FRAGMENT.length(), newline).split(" ");
+		if (head.length != 3) {
+			return null;
+		}
+		int index;
+		int count;
+		try {
+			index = Integer.parseInt(head[1]);
+			count = Integer.parseInt(head[2]);
+		} catch (NumberFormatException exception) {
+			return null;
+		}
+		if (count < 1 || count > MAX_FRAGMENTS || index < 0 || index >= count) {
+			return null;
+		}
+		if (!PIECES.containsKey(head[0]) && PIECES.size() >= 8) {
+			PIECES.clear(); // pieces of messages that never finished
+		}
+		String[] pieces = PIECES.computeIfAbsent(head[0], ignored -> new String[count]);
+		if (pieces.length != count) {
+			PIECES.remove(head[0]);
+			return null;
+		}
+		pieces[index] = piece.substring(newline + 1);
+		for (String part : pieces) {
+			if (part == null) {
+				return null;
+			}
+		}
+		PIECES.remove(head[0]);
+		return String.join("", pieces);
+	}
+
+	private static void handle(String json) {
 		JsonObject in;
 		try {
 			in = JsonParser.parseString(json).getAsJsonObject();
 		} catch (RuntimeException e) {
 			return;
 		}
-		switch (string(in, "t")) {
-			case "hello" -> {
-				available = true;
-				ContainerSearcherClient.LOGGER.info("Chest sharing plugin found on this server, Group tab enabled");
+		try {
+			switch (string(in, "t")) {
+				case "hello" -> {
+					available = true;
+					ContainerSearcherClient.LOGGER.info("Chest sync plugin found on this server, Group tab enabled");
+				}
+				case "state" -> readState(in);
+				case "result" -> {
+					message = string(in, "msg");
+					messageOk = in.has("ok") && in.get("ok").getAsBoolean();
+					messageAt = System.currentTimeMillis();
+				}
+				case "sync_begin" -> {
+					syncing = true;
+					ServerSync.begin();
+				}
+				case "containers" -> ServerSync.containers(array(in, "list"));
+				case "sync_end" -> {
+					ServerSync.end();
+					syncing = false;
+				}
+				case "container" -> ServerSync.container(in);
+				case "container_gone" -> ServerSync.gone(in);
+				default -> { }
 			}
-			case "state" -> readState(in);
-			case "chest" -> readChest(in);
-			case "result" -> {
-				message = string(in, "msg");
-				messageOk = in.has("ok") && in.get("ok").getAsBoolean();
-				messageAt = System.currentTimeMillis();
-			}
-			default -> { }
+		} catch (RuntimeException e) {
+			ContainerSearcherClient.LOGGER.warn("Bad message from the chest sync plugin", e);
 		}
 	}
 
@@ -201,17 +250,8 @@ public final class ProtectClient {
 			? new Invite(string(i.getAsJsonObject(), "group"), string(i.getAsJsonObject(), "from"))
 			: null;
 		friends = strings(in, "friends");
+		friendOf = strings(in, "friend_of");
 		online = strings(in, "online");
-	}
-
-	private static void readChest(JsonObject in) {
-		JsonArray p = array(in, "pos");
-		if (p.size() != 3) {
-			return;
-		}
-		BlockPos pos = new BlockPos(p.get(0).getAsInt(), p.get(1).getAsInt(), p.get(2).getAsInt());
-		CHESTS.put(pos, new Chest(string(in, "status"), string(in, "owner"), bool(in, "mine"), bool(in, "manage"),
-			bool(in, "access"), string(in, "reason"), strings(in, "shared"), string(in, "owner_group"), bool(in, "claimable")));
 	}
 
 	private static void send(JsonObject message) {
@@ -223,16 +263,6 @@ public final class ProtectClient {
 	private static JsonObject message(String type) {
 		JsonObject out = new JsonObject();
 		out.addProperty("t", type);
-		return out;
-	}
-
-	private static JsonObject withPos(String type, BlockPos pos) {
-		JsonObject out = message(type);
-		JsonArray p = new JsonArray();
-		p.add(pos.getX());
-		p.add(pos.getY());
-		p.add(pos.getZ());
-		out.add("pos", p);
 		return out;
 	}
 

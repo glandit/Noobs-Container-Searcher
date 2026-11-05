@@ -199,9 +199,7 @@ public final class ContainerSearchScreen extends CompatScreen {
 	private int mx = -1;
 	private int my = -1;
 	private boolean ctrlDown;
-	// Group tab: the chest looked at when the screen opened (or the last opened one), and its input fields
-	private final net.minecraft.core.BlockPos protectTarget;
-	private EditBox shareBox;
+	// Group tab input fields
 	private EditBox groupNameBox;
 	private EditBox inviteBox;
 	private EditBox friendBox;
@@ -214,10 +212,6 @@ public final class ContainerSearchScreen extends CompatScreen {
 		ITEM_NAME_CACHE.clear();
 		ENCHANTMENT_NAME_CACHE.clear();
 		this.reroll = ContainerSearcherClient.librarianReroll();
-		this.protectTarget = ContainerSearcherClient.protectTarget(Minecraft.getInstance());
-		if (ProtectClient.available()) {
-			ProtectClient.requestInfo(protectTarget);
-		}
 		rebuild();
 	}
 
@@ -280,11 +274,10 @@ public final class ContainerSearchScreen extends CompatScreen {
 			}
 		});
 
-		shareBox = newBox(Component.translatable("screen.noobs_container_searcher.group_share"), "screen.noobs_container_searcher.group_player_hint");
 		groupNameBox = newBox(Component.translatable("screen.noobs_container_searcher.group_create"), "screen.noobs_container_searcher.group_name_hint");
 		inviteBox = newBox(Component.translatable("screen.noobs_container_searcher.group_invite_button"), "screen.noobs_container_searcher.group_player_hint");
 		friendBox = newBox(Component.translatable("screen.noobs_container_searcher.group_friends_add"), "screen.noobs_container_searcher.group_player_hint");
-		for (EditBox box : List.of(shareBox, groupNameBox, inviteBox, friendBox)) {
+		for (EditBox box : List.of(groupNameBox, inviteBox, friendBox)) {
 			box.setMaxLength(16);
 		}
 
@@ -349,11 +342,8 @@ public final class ContainerSearchScreen extends CompatScreen {
 		rerollSearchBox.setVisible(tab == Tab.REROLL);
 		locationNameBox.setVisible(tab == Tab.LOCATIONS);
 		// the Group tab shows its boxes itself, depending on what the server sent
-		for (EditBox box : List.of(shareBox, groupNameBox, inviteBox, friendBox)) {
+		for (EditBox box : List.of(groupNameBox, inviteBox, friendBox)) {
 			box.setVisible(false);
-		}
-		if (tab == Tab.GROUP) {
-			ProtectClient.requestInfo(protectTarget);
 		}
 		closeEditor();
 		numberEdit = NumberEdit.NONE;
@@ -370,7 +360,6 @@ public final class ContainerSearchScreen extends CompatScreen {
 		hexBox.setFocused(target == hexBox);
 		iconSearchBox.setFocused(target == iconSearchBox);
 		numberBox.setFocused(target == numberBox);
-		shareBox.setFocused(target == shareBox);
 		groupNameBox.setFocused(target == groupNameBox);
 		inviteBox.setFocused(target == inviteBox);
 		friendBox.setFocused(target == friendBox);
@@ -842,7 +831,7 @@ public final class ContainerSearchScreen extends CompatScreen {
 		}
 		String container = containerName(row.record.containerType).getString();
 		int whereMax = Math.max(40, rightX - cx - 8);
-		String containerText = trim(container, whereMax);
+		String containerText = trim(container + ownerTag(row.record), whereMax);
 		g.text(font, containerText, cx, y + 17, containerColor(container));
 		cx += font.width(containerText);
 		if (row.record.blockGone) {
@@ -868,6 +857,13 @@ public final class ContainerSearchScreen extends CompatScreen {
 		if (allW > 0) {
 			hitClipped(allX, y + 4, allW, 20, x, viewY, w, viewH, () -> locateRow(row, true));
 		}
+	}
+
+	// synced by the server plugin: whose chest it is, unless it is ours
+	private static String ownerTag(ContainerRecord record) {
+		return record.serverOwner != null && !record.serverMine
+			? " · " + Component.translatable("screen.noobs_container_searcher.owner_tag", record.serverOwner).getString()
+			: "";
 	}
 
 	private void locateRow(ResultRow row, boolean all) {
@@ -1701,7 +1697,7 @@ public final class ContainerSearchScreen extends CompatScreen {
 
 	private void renderGroupTab(Gfx g, int bx, int by, int bw, int bh, int footerY) {
 		submitActions.clear();
-		for (EditBox box : List.of(shareBox, groupNameBox, inviteBox, friendBox)) {
+		for (EditBox box : List.of(groupNameBox, inviteBox, friendBox)) {
 			box.setVisible(false);
 		}
 		String status = ProtectClient.message();
@@ -1713,7 +1709,7 @@ public final class ContainerSearchScreen extends CompatScreen {
 		int gap = 16;
 		int colW = (Math.min(bw, 760) - gap) / 2;
 		int y = by + 6;
-		renderChestSection(g, bx, y, colW);
+		renderSyncSection(g, bx, y, colW);
 		int rx = bx + colW + gap;
 		int afterGroup = renderGroupSection(g, rx, y, colW);
 		renderFriendsSection(g, rx, afterGroup + 10, colW);
@@ -1725,90 +1721,48 @@ public final class ContainerSearchScreen extends CompatScreen {
 		return y + 17;
 	}
 
-	private void renderChestSection(Gfx g, int x, int y, int w) {
-		y = section(g, "chest", x, y, w);
-		net.minecraft.core.BlockPos pos = protectTarget;
-		if (pos == null || minecraft.level == null) {
-			g.text(font, trim(gt("chest_none"), w), x, y, TEXT_MUTED);
-			return;
-		}
-		var state = minecraft.level.getBlockState(pos);
-		card(g, x, y, w, 26, SURFACE, BORDER);
-		g.fakeItem(new ItemStack(state.getBlock().asItem()), x + 5, y + 5);
-		g.text(font, trim(state.getBlock().getName().getString(), w - 32), x + 26, y + 4, TEXT_PRIMARY);
-		g.text(font, pos.getX() + " " + pos.getY() + " " + pos.getZ(), x + 26, y + 15, TEXT_MUTED);
-		y += 32;
-
-		ProtectClient.Chest chest = ProtectClient.chest(pos);
-		if (chest == null) {
-			g.text(font, trim(gt("loading"), w), x, y, TEXT_MUTED);
-			return;
-		}
-		switch (chest.status()) {
-			case "unlocked" -> {
-				g.text(font, trim(gt("chest_unlocked"), w), x, y, WARNING);
-				y += 14;
-				if (!chest.claimable()) {
-					g.text(font, trim(gt("chest_too_far"), w), x, y, TEXT_MUTED);
-					return;
-				}
-				actionButton(g, x, y, gt("lock"), false, () -> ProtectClient.lock(pos));
-				y += 26;
-				renderShareInput(g, pos, chest, x, y, w);
-			}
-			case "locked" -> renderLockedChest(g, pos, chest, x, y, w);
-			default -> g.text(font, trim(gt("chest_missing"), w), x, y, TEXT_MUTED);
-		}
-	}
-
-	private void renderLockedChest(Gfx g, net.minecraft.core.BlockPos pos, ProtectClient.Chest chest, int x, int y, int w) {
-		g.text(font, trim(chest.mine() ? gt("chest_mine") : gt("chest_owner", chest.owner()), w), x, y, chest.mine() ? SUCCESS : TEXT_PRIMARY);
+	// what the server syncs into the search: our chests, the group's and those of players who added us as a friend
+	private void renderSyncSection(Gfx g, int x, int y, int w) {
+		y = section(g, "sync", x, y, w);
+		y = paragraph(g, gt("sync_hint"), x, y, w, TEXT_MUTED) + 6;
+		int[] counts = ServerSync.counts();
+		g.text(font, trim(gt("sync_mine", counts[0]), w), x, y, TEXT_PRIMARY);
 		y += 12;
-		if (!chest.mine()) {
-			String access = chest.access() ? gt("access_" + chest.reason()) : gt("access_none");
-			g.text(font, trim(access, w), x, y, chest.access() ? TEXT_SECONDARY : DANGER);
+		g.text(font, trim(gt("sync_others", counts[1]), w), x, y, TEXT_PRIMARY);
+		y += 16;
+		List<String> owners = ProtectClient.friendOf();
+		if (!owners.isEmpty()) {
+			g.text(font, trim(gt("friend_of"), w), x, y, TEXT_SECONDARY);
 			y += 12;
-		}
-		if (!chest.ownerGroup().isEmpty()) {
-			g.text(font, trim(gt("chest_group", chest.ownerGroup()), w), x, y, TEXT_MUTED);
-			y += 12;
-		}
-		if (chest.access()) {
-			y += 6;
-			g.text(font, gt("shared_with"), x, y, TEXT_SECONDARY);
-			y += 12;
-			List<ChipSpec> shared = new ArrayList<>();
-			for (String name : chest.shared()) {
-				shared.add(new ChipSpec(name, -1, 0, false, chest.manage(),
-					chest.manage() ? () -> ProtectClient.unshare(pos, name) : () -> { }));
+			List<ChipSpec> chips = new ArrayList<>();
+			for (String name : owners) {
+				chips.add(new ChipSpec(name, -1, 0, false, false, () -> { }));
 			}
-			if (shared.isEmpty()) {
-				g.text(font, gt("nobody"), x, y + 3, TEXT_MUTED);
-				y += 16;
-			} else {
-				y += flowChips(g, shared, x, y, w, true) + 6;
-			}
+			y += flowChips(g, chips, x, y, w, true) + 6;
 		}
-		if (!chest.manage()) {
-			return;
+		if (ProtectClient.syncing()) {
+			g.text(font, trim(gt("syncing"), w), x, y + 5, TEXT_MUTED);
+		} else {
+			actionButton(g, x, y, gt("sync_reload"), false, ProtectClient::requestSync);
 		}
-		y += 4;
-		y = renderShareInput(g, pos, chest, x, y, w);
-		actionButton(g, x, y + 4, gt("unlock"), true, () -> confirm("unlock_title", "unlock_message", null, () -> ProtectClient.unlock(pos)));
 	}
 
-	// name field + "Share" button, plus one click chips for everyone online
-	private int renderShareInput(Gfx g, net.minecraft.core.BlockPos pos, ProtectClient.Chest chest, int x, int y, int w) {
-		inputRow(g, shareBox, x, y, w, gt("share"), name -> ProtectClient.share(pos, name));
-		y += 26;
-		List<ChipSpec> quick = new ArrayList<>();
-		for (String name : ProtectClient.online()) {
-			if (!chest.shared().contains(name) && !name.equalsIgnoreCase(chest.owner())) {
-				quick.add(new ChipSpec("+ " + name, -1, 0, false, false, () -> ProtectClient.share(pos, name)));
+	// text over as many lines as it needs, returns the y below it
+	private int paragraph(Gfx g, String text, int x, int y, int w, int color) {
+		String line = "";
+		for (String word : text.split(" ")) {
+			String next = line.isEmpty() ? word : line + " " + word;
+			if (!line.isEmpty() && font.width(next) > w) {
+				g.text(font, line, x, y, color);
+				y += 11;
+				line = word;
+			} else {
+				line = next;
 			}
 		}
-		if (!quick.isEmpty()) {
-			y += flowChips(g, quick, x, y, w, true) + 6;
+		if (!line.isEmpty()) {
+			g.text(font, line, x, y, color);
+			y += 11;
 		}
 		return y;
 	}
@@ -2549,7 +2503,7 @@ public final class ContainerSearchScreen extends CompatScreen {
 		if (tab == Tab.LOCATIONS && (press.test(locationNameBox) || press.test(radiusBox) || press.test(hexBox) || press.test(iconSearchBox))) {
 			return true;
 		}
-		if (tab == Tab.GROUP && (press.test(shareBox) || press.test(groupNameBox) || press.test(inviteBox) || press.test(friendBox))) {
+		if (tab == Tab.GROUP && (press.test(groupNameBox) || press.test(inviteBox) || press.test(friendBox))) {
 			return true;
 		}
 		return tab == Tab.REROLL && press.test(rerollSearchBox);

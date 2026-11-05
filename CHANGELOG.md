@@ -3,8 +3,8 @@
 ## 1.23 (branch truhenschutz)
 
 ### Added
-- Group tab for the optional chest sharing server plugin (lock chests, share them with players, friends and groups). Only visible on servers with the plugin.
-- Chest sync: what you see in a container is sent to friends and group members (through the plugin) who may open it themselves, and what they see ends up in your search. Needs plugin 1.1.0 or newer. Turn it off with `shareWithFriends` in `settings.json`.
+- Group tab for the optional chest sync server plugin (groups and friends). Only visible on servers with the plugin.
+- Server sync: on servers with the plugin, the contents of your own chests and those of your group and friends end up in your search without opening them. Results from other players' chests show the owner. Needs plugin 1.2.0 or newer.
 
 ## 1.22
 
